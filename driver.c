@@ -16,17 +16,20 @@
 #include <sys/types.h>
 #include <time.h>
 
+//key for shared memory
 #define KEY ftok("hw4", 65)
 
 sem_t semaphore;
 
-
-int thread_solution(DIR* directory, int n, char* folderName, int numThreads);
+int thread_solution(DIR* directory, int n, char* folderName);
 void thread_method(char* args[]);
 void process_solution(DIR* directory, int n, char* folderName, int numThreads);
 
+
+
 int main(int argc, char *argv[])
 {
+    //clocks for tracking speed
     clock_t start;
     clock_t end;
 
@@ -37,14 +40,19 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-
+    //convert cli vars to local
     int n = atoi(argv[1]);
+
+    if (n < 0) 
+        perror("Usage: <n:int> must have a greater that 0 value");
     char *selector = argv[2];
     const char *folderName = argv[3];
 
+
+    //initialize semaphore with number of threads
     sem_init(&semaphore, 0, n);
 
-
+    //open user defined directory
     DIR *directory = opendir(folderName);
 
     if (directory == NULL)
@@ -53,7 +61,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-
+    //flow control for selecting between light weight and heavy processes
     if (strcmp(selector, "t") == 0) {
         thread_solution(directory, n, folderName, n);
     } else if (strcmp(selector, "p") == 0) {
@@ -66,57 +74,61 @@ int main(int argc, char *argv[])
     
     closedir(directory);
 
+    //calculate and print time elapsed 
     double time_elapsed = (((double) end - (double) start)/ CLOCKS_PER_SEC);
     printf("Total time: %fs\n", time_elapsed);
     return EXIT_SUCCESS;
 } 
 
-
-int thread_solution(DIR* directory, int n, char* folderName, int numThreads) {
-    
-    char* root = "/home/day22/P_Drive/OS/hw4/"; 
+// thread solution takes in a directory containing png images, the max number of
+// threads, the name of the folder containing the images. It then creates up to  
+// n light weight thread to execute the colorConver function.
+int thread_solution(DIR* directory, int n, char* folderName) {
+    // struct to hold file data
     struct dirent *directory_ent;
-    pthread_t threads[n];   
-    int counter = 0;
-    while ((directory_ent = readdir(directory)) != NULL)
-    {
-        // //create a new thread for each file while the semaphore is available
-        // sem_wait(&semaphore);        
 
+    //create thread pool 
+    pthread_t threads[n];
+
+    // counter to track what process to assign   
+    int counter = 0;
+
+    // while there are files left to read
+    while ((directory_ent = readdir(directory)) != NULL)
+    {    
         //if parent dir or current dir skip
         if (!strcmp(directory_ent->d_name, ".") || !strcmp(directory_ent->d_name, ".."))
            continue;
 
         char dest[50], src[50];
-        //strcpy(src, directory_ent->d_name);
+
         //create arguments for args struct 
         char* fileName = directory_ent->d_name;
+
         //input file name creation
         strcpy(src, "images/");
         strcat(src , fileName);
-        //printf("%s\n", src);
 
-        //output file name creation
+        //output file name creation same as source with out_ preaprended 
         strcpy(dest, "images/");
         strcat(dest, "out_");
         strcat(dest, fileName);
-        //printf("%s\n", dest);
 
         char* args[3];
         args[0] = "./colorConvert";
         args[1] = src;
         args[2] = dest;
-        //colorConvert(3 , args);
         
-        int rc = pthread_create(&threads[counter%numThreads], NULL, (void*)&thread_method, &args);
+        //create thread to run color convert on current image
+        int rc = pthread_create(&threads[counter%numThreads], 
+                                NULL, 
+                                (void*)&thread_method, &args);
+
+        //increment to next thread
         counter++;
-        // sem down number 
-        // lock struct 
-        // load struct 
-        // thread create(strcat(folder, fn))
-        //printf("[%s]\n", directory_ent->d_name);
-        
     }
+
+    //join all threads once they have finished 
     void* ret;
     for (int i = 0; i < numThreads; i++)
     {
@@ -125,61 +137,79 @@ int thread_solution(DIR* directory, int n, char* folderName, int numThreads) {
     pthread_exit(0);
 }
 
+// thread method protects the concurrency by using the semaphore to track
+// the number of threads that can run.
 void thread_method(char* args[]) {
-    //create a new thread for each file while the semaphore is available
+    //down the semaphore 
     sem_wait(&semaphore);
-    printf("%s\n", args[2]);
+
+    // run color convert on file
     colorConvert(3 , args);
+
+    //up the semaphore
     sem_post(&semaphore);
 }
 
+// proceses solution uses a shared memory int to track the number of child 
+// processes currently active. The method will fork children to run the 
+// colorConvert method but will block if the number of current children 
+// exceeds the user defined amount 
 void process_solution(DIR* directory, int n, char* folderName, int num_process) {
 
+    // create shared token
     int sh_id = shmget(KEY, sizeof(int), IPC_CREAT | 0666);
     if (sh_id < 0)
         perror("shmget");
 
+    // attach token to parent process
     int* process_count;
     process_count = shmat(sh_id, NULL, 0);
     process_count = n;
 
+    // while there are more files to read
     struct dirent *directory_ent;
     while ((directory_ent = readdir(directory)) != NULL)
     {     
+        // if processes are all used block
         while (process_count < 0)
         {
             //wait until there is an available
-            printf("%d", *process_count); 
         }
+
+        // child pid
         pid_t cpid;
         
+        // fork a child
         if((cpid = fork()) < 0){ //create and check child
-        perror("Fork Error");
+            perror("Fork Error");
         }
+
+        //in child
         if(cpid == 0){ 
+
+            // attach shared memory to child
             int* semaphore = shmat(sh_id, NULL, 0);
             if (semaphore < 0) 
                 perror("c_data");
 
+            // down the semaphore in new as new process is created 
             semaphore--;
+
             //if parent dir or current dir skip
             if (!strcmp(directory_ent->d_name, ".") || !strcmp(directory_ent->d_name, ".."))
             continue;
 
-            char dest[50], src[50];
-            //strcpy(src, directory_ent->d_name);
-            //create arguments for args struct 
-            char* fileName = directory_ent->d_name;
             //input file name creation
+            char dest[50], src[50];
+            char* fileName = directory_ent->d_name;
+            
             strcpy(src, "images/");
             strcat(src , fileName);
-            //printf("%s\n", src);
 
             //output file name creation
             strcpy(dest, "images/");
             strcat(dest, "out_");
             strcat(dest, fileName);
-            //printf("%s\n", dest);
 
             char* args[3];
             args[0] = "./colorConvert";
@@ -191,6 +221,7 @@ void process_solution(DIR* directory, int n, char* folderName, int num_process) 
             _Exit(EXIT_SUCCESS);          
         }
     }
+    // wait for all child processes to complete before returning
     int wpid;
     int rd = 0;
     while ((wpid = wait(&rd)) > 0)
