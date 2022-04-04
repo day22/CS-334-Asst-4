@@ -19,13 +19,29 @@
 //key for shared memory
 #define KEY ftok("hw4", 65)
 
+//thread pool
+pthread_mutex_t mutexQueue;
+pthread_cond_t condQueue;
+
+//
+typedef struct Task {
+    void (*taskFunction)(int, char*[]);
+    char* exec;
+    char* src;
+    char* dest;
+} Task;
+
+Task taskQueue[256];
+int taskCount = 0;
+
 sem_t semaphore;
 
 int thread_solution(DIR* directory, int n, char* folderName);
 void thread_method(char* args[]);
 void process_solution(DIR* directory, int n, char* folderName, int numThreads);
-
-
+void submitTask(Task task);
+void executeTask(Task* task);
+int threadpool_solution(DIR* directory, int n, char* folderName);
 
 int main(int argc, char *argv[])
 {
@@ -63,7 +79,7 @@ int main(int argc, char *argv[])
 
     //flow control for selecting between light weight and heavy processes
     if (strcmp(selector, "t") == 0) {
-        thread_solution(directory, n, folderName, n);
+        thread_solution(directory, n, folderName);
     } else if (strcmp(selector, "p") == 0) {
         start = clock();
         process_solution(directory, n, folderName, n);
@@ -120,7 +136,7 @@ int thread_solution(DIR* directory, int n, char* folderName) {
         args[2] = dest;
         
         //create thread to run color convert on current image
-        int rc = pthread_create(&threads[counter%numThreads], 
+        int rc = pthread_create(&threads[counter%n], 
                                 NULL, 
                                 (void*)&thread_method, &args);
 
@@ -130,11 +146,100 @@ int thread_solution(DIR* directory, int n, char* folderName) {
 
     //join all threads once they have finished 
     void* ret;
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < n; i++)
     {
         pthread_join(threads[i],&ret);
     }
     pthread_exit(0);
+}
+
+void* startThread(void* args) {
+    while (1) {
+        Task task;
+
+        pthread_mutex_lock(&mutexQueue);
+        while (taskCount == 0) {
+            pthread_cond_wait(&condQueue, &mutexQueue);
+        }
+
+        task = taskQueue[0];
+        int i;
+        for (i = 0; i < taskCount - 1; i++) {
+            taskQueue[i] = taskQueue[i + 1];
+        }
+        taskCount--;
+        pthread_mutex_unlock(&mutexQueue);
+        executeTask(&task);
+    }
+}
+
+void submitTask(Task task) {
+    pthread_mutex_lock(&mutexQueue);
+    taskQueue[taskCount] = task;
+    taskCount++;
+    pthread_mutex_unlock(&mutexQueue);
+    pthread_cond_signal(&condQueue);
+}
+
+void executeTask(Task* task) {
+    char* args[] = {task->exec, task->src, task->dest}; 
+    task->taskFunction(3, args);
+}
+
+int threadpool_solution(DIR* directory, int n, char* folderName) {
+
+    pthread_t th[n];
+    pthread_mutex_init(&mutexQueue, NULL);
+    pthread_cond_init(&condQueue, NULL);
+    int i;
+    for (i = 0; i < n; i++) {
+        if (pthread_create(&th[i], NULL, &startThread, NULL) != 0) {
+            perror("Failed to create the thread");
+        }
+    }
+    printf("pthreads created");
+    // struct to hold file data
+    struct dirent *directory_ent;
+    while ((directory_ent = readdir(directory)) != NULL)
+    {
+        //if parent dir or current dir skip
+        if (!strcmp(directory_ent->d_name, ".") || !strcmp(directory_ent->d_name, ".."))
+           continue;
+
+        char dest[50], src[50];
+
+        //create arguments for args struct 
+        char* fileName = directory_ent->d_name;
+
+        //input file name creation
+        strcpy(src, "images/");
+        strcat(src , fileName);
+
+        //output file name creation same as source with out_ preaprended 
+        strcpy(dest, "images/");
+        strcat(dest, "out_");
+        strcat(dest, fileName);
+
+        Task t = {
+            .taskFunction = &colorConvert,
+            .exec = "./colorConvert",
+            .src = src,
+            .dest = dest
+        };
+        printf("taskAdded %s", t.src);
+        submitTask(t);
+
+    }
+    for (i = 0; i < n; i++) {
+        if (pthread_join(th[i], NULL) != 0) {
+            perror("Failed to join the thread");
+    }
+    pthread_mutex_destroy(&mutexQueue);
+    pthread_cond_destroy(&condQueue);
+    return 0;
+        
+
+    }
 }
 
 // thread method protects the concurrency by using the semaphore to track
